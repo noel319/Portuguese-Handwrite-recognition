@@ -1,30 +1,49 @@
-import os
-from datasets import Dataset, DatasetDict
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel, Seq2SeqTrainer, Seq2SeqTrainingArguments
+from datasets import load_from_disk
 from PIL import Image
 
-def load_images_and_labels(data_dir):
-    images=[]
-    texts=[]
-    for root, _, files in os.walk(data_dir):
-        for file in files:
-            if file.endswith('.jpg') or file.endswith('.png'):
-                image_path = os.path.join(root, file)
-                text_path = image_path.replace('.jpg','.txt').replace('.png', '.txt')
-                if os.path.exists(text_path):
-                    with open(text_path, 'r', encoding='utf-8') as f:
-                        text = f.read().strip()
-                    images.append(image_path)
-                    texts.append(text)
-    return images, texts
+# Load dataset
+dataset = load_from_disk("portuguese_handwritten_dataset")
 
-def prepare_dataset(data_dir):
-    images, texts = load_images_and_labels(data_dir)
-    dataset = Dataset.from_dict({"image":images, "text":texts})
-    dataset = dataset.train_test_split(test_size=0.1)
-    return dataset
+# Load processor and model
+processor = TrOCRProcessor.from_pretrained('microsoft/trocr-base-handwritten')
+model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-base-handwritten')
 
+def preprocess_data(examples):
+    images = [Image.open(image_path).convert("RGB") for image_path in examples['image']]
+    pixel_values = processor(images, return_tensors="pt").pixel_values
+    labels = processor.tokenizer(examples['text'], padding="max_length", truncation=True, return_tensors="pt").input_ids
+    return {"pixel_values": pixel_values, "labels": labels}
 
-if __name__ == "__main__":
-    data_dir = "data/"
-    dataset = prepare_dataset(data_dir)
-    dataset.save_to_disk("portuguese_handwritten_dataset")
+# Preprocess dataset
+dataset = dataset.map(preprocess_data, batched=True, remove_columns=["image", "text"])
+
+# Training arguments
+training_args = Seq2SeqTrainingArguments(
+    output_dir="./trocr-finetuned-portuguese",
+    per_device_train_batch_size=2,
+    per_device_eval_batch_size=2,
+    num_train_epochs=3,
+    save_steps=1000,
+    save_total_limit=2,
+    evaluation_strategy="steps",
+    eval_steps=500,
+    logging_steps=500,
+    learning_rate=5e-5,
+)
+
+# Trainer
+trainer = Seq2SeqTrainer(
+    model=model,
+    args=training_args,
+    train_dataset=dataset["train"],
+    eval_dataset=dataset["test"],
+    tokenizer=processor,
+)
+
+# Train
+trainer.train()
+
+# Save the model
+model.save_pretrained("./trocr-finetuned-portuguese")
+processor.save_pretrained("./trocr-finetuned-portuguese")
